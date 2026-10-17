@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Self-Service Print Kiosk</title>
+    <meta name="description" content="Local-first self-service print kiosk for Raspberry Pi OS, with pixel-density pricing, PayMongo GCash, cash acceptors, and PDF preview." />
+    <meta property="og:title" content="Self-Service Print Kiosk" />
+    <meta property="og:description" content="Local-first self-service print kiosk for Raspberry Pi OS, with pixel-density pricing, PayMongo GCash, cash acceptors, and PDF preview." />
+    <meta property="og:type" content="website" />
+    <!-- Google Fonts: Plus Jakarta Sans & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <!-- PDF.js CDN for client-side display canvas -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <!-- QRCode.js for mobile upload and PayMongo GCash QR rendering -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
