@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Self-Service Print Kiosk</title>
+  <meta name="description" content="Local-first self-service print kiosk for Raspberry Pi OS." />
+  <link rel="stylesheet" href="/static/style.css" />
+  <!-- PDF.js CDN for client-side display canvas -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- QRCode.js for mobile upload and PayMongo GCash QR rendering -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+
+  <!-- KIOSK HEADER -->
+  <header class="kiosk-header" id="kiosk-header">
+    <div class="brand-section">
+      <div class="brand-icon" id="brand-icon">🖨️</div>
+      <div>
+        <div class="brand-title">PRINTPOINT KIOSK</div>
+        <div class="brand-subtitle">Raspberry Pi 4 • Epson EcoTank System</div>
+      </div>
+    </div>
+
+    <!-- Realtime Telemetry Status Bar -->
+    <div class="telemetry-status-bar">
+      <div class="status-pill" id="hardware-status-pill">
+        <span class="status-indicator status-online" id="hardware-status-dot"></span>
+        <span id="hardware-status-text">Arduino Uno Active</span>
+      </div>
+
+      <div class="status-pill" id="internet-status-pill">
+        <span class="status-indicator status-online" id="internet-status-dot"></span>
+        <span id="internet-status-text">Online</span>
+      </div>
+
+      <div class="status-pill" id="trays-status-pill">
+        <span>📑 Trays: A4 • Letter • Long</span>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <button class="icon-btn" id="fullscreen-btn" onclick="toggleFullscreen()" title="Kiosk Mode Fullscreen">
+        ⛶ Fullscreen
+      </button>
+    </div>
+  </header>
+
+  <!-- CRITICAL HARDWARE DISCONNECTION ALERT BANNER -->
+  <div class="hardware-alert-banner hidden" id="hardware-alert-banner">
+    <div>⚠️ <strong>Hardware link disconnected:</strong> Microcontroller (Arduino Uno R3) is offline. Cash payments and physical printing are temporarily blocked until connection is restored.</div>
+    <span style="font-size: 13px; opacity: 0.9;">Auto-recovering...</span>
+  </div>
+
+  <!-- STEP NAVIGATION INDICATOR -->
+  <nav class="step-navigation-bar" id="step-nav-bar">
+    <div class="step-indicator-item active" id="step-ind-1">
+      <div class="step-number">1</div>
+      <div class="step-label">Upload</div>
+    </div>
+    <div class="step-divider"></div>
+    <div class="step-indicator-item" id="step-ind-2">
+      <div class="step-number">2</div>
+      <div class="step-label">Configure</div>
+    </div>
+    <div class="step-divider"></div>
+    <div class="step-indicator-item" id="step-ind-3">
+      <div class="step-number">3</div>
+      <div class="step-label">Payment</div>
+    </div>
+    <div class="step-divider"></div>
+    <div class="step-indicator-item" id="step-ind-4">
+      <div class="step-number">4</div>
+      <div class="step-label">Printing</div>
+    </div>
+    <div class="step-divider"></div>
+    <div class="step-indicator-item" id="step-ind-5">
+      <div class="step-number">5</div>
+      <div class="step-label">Receipt</div>
+    </div>
+  </nav>
+
+  <!-- MAIN KIOSK CONTENT CONTAINER -->
+  <main class="kiosk-container" id="kiosk-main-content">
+
+    <!-- ==================== STEP 1: UPLOAD HUB ==================== -->
+    <section class="kiosk-view active-view" id="view-upload">
+      <div class="upload-hub-header">
+        <h1 class="upload-hub-title">Select Your Upload Method</h1>
+        <p class="upload-hub-subtitle">Upload your digital PDF file. Uploaded files are session-scoped and automatically destroyed after printing.</p>
+      </div>
+
+      <div class="upload-channels-grid">
+        <!-- Channel 1: QR Code Mobile Upload -->
+        <div class="channel-card" id="channel-qr" onclick="openQrModal()">
+          <div class="channel-icon">📱</div>
+          <h2 class="channel-name">Scan QR Code</h2>
+          <p class="channel-desc">Scan with your smartphone camera to upload directly from your phone browser without cables or flash drives.</p>
+          <span class="channel-action-badge">Tap to View QR</span>
+        </div>
+
+        <!-- Channel 2: WiFi Hotspot Upload -->
+        <div class="channel-card" id="channel-hotspot" onclick="openHotspotModal()">
+          <div class="channel-icon">📶</div>
+          <h2 class="channel-name">Pi Wi-Fi Hotspot</h2>
+          <p class="channel-desc">Connect your device to the kiosk's private local Wi-Fi hotspot and upload files securely over the local network.</p>
+          <span class="channel-action-badge">View Hotspot Info</span>
+        </div>
+
+        <!-- Channel 3: USB Flash Drive -->
+        <div class="channel-card" id="channel-usb" onclick="openUsbModal()">
+          <div class="channel-icon">💾</div>
+          <h2 class="channel-name">USB Flash Drive</h2>
+          <p class="channel-desc">Insert your USB drive into the kiosk. Drives are mounted read-only and unmounted cleanly after copying.</p>
+          <span class="channel-action-badge">Browse USB Files</span>
+        </div>
+
+        <!-- Channel 4: Direct Browse / Touch Drop -->
+        <div class="channel-card" id="channel-direct" onclick="document.getElementById('direct-file-input').click()">
+          <div class="channel-icon">📁</div>
+          <h2 class="channel-name">Browse / Drag & Drop</h2>
+          <p class="channel-desc">Directly pick or drop a PDF document from this terminal or development workstation.</p>
+          <span class="channel-action-badge">Choose PDF File</span>
+          <input type="file" id="direct-file-input" accept="application/pdf" style="display: none;" />
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== STEP 2: PREVIEW & CONFIGURATION ==================== -->
+    <section class="kiosk-view" id="view-preview">
+      <div class="preview-layout">
+        <!-- Left: PDF.js Canvas Viewer -->
+        <div class="preview-viewport-card">
+          <div class="canvas-wrapper">
+            <canvas id="pdf-canvas"></canvas>
+          </div>
+          <div class="canvas-nav-bar">
+            <button class="icon-btn" id="pdf-prev-btn">◀ Previous</button>
+            <span id="pdf-page-indicator" style="font-weight: 700; font-size: 15px;">Page 1 of 1</span>
+            <button class="icon-btn" id="pdf-next-btn">Next ▶</button>
+          </div>
+        </div>
+
+        <!-- Right: Print Options & Authoritative Pricing Sidebar -->
+        <div class="config-sidebar-card">
+          <!-- Paper Size Selector (Maps 1:1 to NEMA17 Stepper Tray) -->
+          <div>
+            <div class="control-group-title">
+              <span>Paper Size</span>
+              <span style="font-size: 11px; color:#60a5fa;">DRV8825 Motor Tray</span>
+            </div>
+            <div class="segment-selector">
+              <button class="segment-btn paper-size-btn active" data-size="A4" onclick="setPaperSize('A4')">A4</button>
+              <button class="segment-btn paper-size-btn" data-size="LETTER" onclick="setPaperSize('LETTER')">Letter</button>
+              <button class="segment-btn paper-size-btn" data-size="LONG" onclick="setPaperSize('LONG')">Long (8.5x13")</button>
+            </div>
+          </div>
+
+          <!-- Color Mode Toggle -->
+          <div>
+            <div class="control-group-title">Color Mode</div>
+            <div class="segment-selector color-mode-toggle">
+              <button class="segment-btn color-mode-btn active" data-mode="bw" onclick="setColorMode('bw')">⬛ B&W (Monochrome)</button>
+              <button class="segment-btn color-mode-btn" data-mode="color" onclick="setColorMode('color')">🎨 Full Color</button>
+            </div>
+          </div>
+
+          <!-- Page Selection -->
+          <div>
+            <div class="control-group-title">
+              <span>Pages to Print</span>
+              <div>
+                <button class="icon-btn" id="select-all-pages-btn" style="min-height:30px; padding:4px 8px; font-size:11px;" onclick="selectAllPages()">All</button>
+                <button class="icon-btn" id="deselect-all-pages-btn" style="min-height:30px; padding:4px 8px; font-size:11px;" onclick="deselectAllPages()">Clear</button>
+              </div>
+            </div>
+            <div class="page-checkboxes-container" id="page-selector-grid"></div>
+          </div>
+
+          <!-- Copies & Collate & Reverse Order -->
+          <div>
+            <div class="control-group-title">Copies & Sequencing</div>
+            <div class="copies-stepper">
+              <button class="stepper-btn" id="copies-dec" onclick="changeCopies(-1)">-</button>
+              <span class="stepper-val" id="copies-val">1</span>
+              <button class="stepper-btn" id="copies-inc" onclick="changeCopies(1)">+</button>
+            </div>
+          </div>
+
+          <div class="toggle-switch-row">
+            <span class="toggle-label">Reverse Print Order (Last to First)</span>
+            <input type="checkbox" id="reverse-toggle" style="transform: scale(1.4); cursor: pointer;" />
+          </div>
+
+          <div class="toggle-switch-row">
+            <div>
+              <div class="toggle-label">Collate Multiple Copies</div>
+              <small style="color: #94a3b8; font-size: 11px;">[1,2,3][1,2,3] vs [1,1][2,2][3,3]</small>
+            </div>
+            <input type="checkbox" id="collate-toggle" checked style="transform: scale(1.4); cursor: pointer;" />
+          </div>
+
+          <!-- Authoritative Server-Side Pricing Card -->
+          <div class="pricing-summary-card">
+            <div style="font-size: 12px; color: #38bdf8; font-weight: 700; margin-bottom: 8px;">
+              AUTHORITATIVE GHOSTSCRIPT PIXEL PRICING
+            </div>
+            <div class="price-row">
+              <span>Unit Price per Set:</span>
+              <span class="price-amount" id="unit-price-display">₱0.00</span>
+            </div>
+            <div class="price-row">
+              <span>Total Sheets to Feed:</span>
+              <span class="price-amount" id="total-sheets-display">1 sheets</span>
+            </div>
+            <div class="price-row grand-total">
+              <span>Grand Total:</span>
+              <span class="price-amount" id="grand-total-display" style="color: #4ade80;">₱0.00</span>
+            </div>
+            <button class="primary-cta-btn" id="proceed-to-pay-btn">
+              Proceed to Payment ➔
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== STEP 3: PAYMENT SELECTION ==================== -->
+    <section class="kiosk-view" id="view-payment">
+      <div class="upload-hub-header">
+        <h1 class="upload-hub-title">Complete Payment</h1>
+        <p class="upload-hub-subtitle">Amount Due: <strong id="payment-grand-total" style="color: #4ade80; font-size: 24px;">₱0.00</strong></p>
+      </div>
+
+      <div class="payment-grid">
+        <!-- Payment Option 1: GCash QR (PayMongo Test Sandbox) -->
+        <div class="payment-card" id="gcash-payment-card" onclick="selectPaymentMethod('gcash')">
+          <span class="offline-badge" style="display: none;">OFFLINE</span>
+          <div class="channel-icon" style="background: rgba(0, 122, 255, 0.15);">📱</div>
+          <h2 class="channel-name">GCash QR (PayMongo)</h2>
+          <p class="channel-desc">Scan dynamic QR code with your GCash app. Confirmed automatically without manual cashier intervention.</p>
+          <div id="gcash-qr-container" style="min-height: 220px; display: flex; align-items: center; justify-content: center;">
+            <div style="color: #94a3b8;">Tap to initialize GCash QR</div>
+          </div>
+          <div id="gcash-status-text" style="font-size: 13px; color: #60a5fa; margin-top: 10px; font-weight: 600;">
+            Awaiting selection...
+          </div>
+          <small style="color: #64748b; margin-top: 12px; font-size: 11px;">
+            * Sandbox Test Mode (Instant webhook confirmation & Telegram owner notification)
+          </small>
+        </div>
+
+        <!-- Payment Option 2: Cash Acceptors (TB74 Bill & Allan 1239A Coin) -->
+        <div class="payment-card" id="cash-payment-card" onclick="selectPaymentMethod('cash')">
+          <div class="channel-icon" style="background: rgba(16, 185, 129, 0.15);">💵</div>
+          <h2 class="channel-name">Cash (Bills & Coins)</h2>
+          <p class="channel-desc">Accepts ₱20, ₱50, ₱100 bills and ₱1, ₱5, ₱10, ₱20 coins. Change dispensed in ₱1 & ₱5 coins.</p>
+
+          <div class="cash-running-balance-box">
+            <div style="font-size: 13px; color: #94a3b8; font-weight: 600;">INSERTED CASH</div>
+            <div class="running-balance-val" id="cash-running-balance">₱0.00</div>
+            <div style="font-size: 14px; color: #f87171; margin-top: 4px;">
+              Remaining Due: <strong id="cash-remaining-due">₱0.00</strong>
+            </div>
+          </div>
+
+          <div class="change-preview-box" id="change-preview-box" style="display: none;">
+            Change: ₱0.00
+          </div>
+
+          <div style="font-size: 12px; color: #94a3b8; text-align: center; margin-bottom: 16px;">
+            ⚠️ <strong>Hardware Note:</strong> Coin hoppers dispense only ₱1 and ₱5 coins. Maximum payable amount is ₱200.00.
+          </div>
+
+          <button class="icon-btn" id="cancel-cash-btn" style="width: 100%; justify-content: center; color: #f87171;">
+            Cancel Cash & Return to Options
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== STEP 4: PRINTING IN PROGRESS ==================== -->
+    <section class="kiosk-view" id="view-printing">
+      <div class="printing-progress-container">
+        <div class="print-animation-icon">🖨️</div>
+        <h1 style="font-size: 30px; font-weight: 800; margin-bottom: 8px;">Printing in Progress</h1>
+        <p style="color: #94a3b8; font-size: 16px;" id="print-page-status">Feeding paper from NEMA17 tray motor...</p>
+
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="print-progress-bar"></div>
+        </div>
+        <div id="print-progress-text" style="font-size: 18px; font-weight: 700; color: #60a5fa;">
+          Printing Sheet 1 of 1 (0%)
+        </div>
+
+        <div style="margin-top: 28px; font-size: 13px; color: #64748b;">
+          Please wait while your document is being printed and ejected from the tray.
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== STEP 5: RECEIPT & COMPLETION ==================== -->
+    <section class="kiosk-view" id="view-receipt">
+      <div class="receipt-card">
+        <div class="receipt-header">
+          <h2 style="font-size: 20px; font-weight: 900;">PRINTPOINT KIOSK</h2>
+          <div style="font-size: 12px; color: #64748b;">OFFICIAL TRANSACTION SUMMARY</div>
+        </div>
+
+        <div class="receipt-row">
+          <span>Session Token:</span>
+          <strong id="receipt-session-id">----</strong>
+        </div>
+        <div class="receipt-row">
+          <span>Timestamp:</span>
+          <span id="receipt-date">----</span>
+        </div>
+        <div class="receipt-row">
+          <span>Total Cost:</span>
+          <strong id="receipt-total-cost">₱0.00</strong>
+        </div>
+        <div class="receipt-row">
+          <span>Change Dispensed:</span>
+          <strong id="receipt-change-dispensed" style="color: #059669;">₱0.00</strong>
+        </div>
+        <div id="receipt-change-details" style="font-size: 11px; color: #059669; text-align: right; margin-bottom: 12px;"></div>
+
+        <div class="receipt-privacy">
+          <h3>What would you like to do with your printed document?</h3>
+          <button class="privacy-delete-btn" id="delete-file-btn" type="button">Delete File Right Away</button>
+          <button class="privacy-keep-btn" id="keep-file-btn" type="button">Keep File</button>
+          <p class="privacy-retention-warning">For your privacy, your file will be automatically deleted after 30 minutes.</p>
+          <p class="privacy-action-status" id="privacy-action-status" role="status" aria-live="polite" hidden></p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ==================== MODALS ==================== -->
+  <!-- QR Upload Modal -->
+  <div class="upload-modal-overlay" id="qr-modal">
+    <div class="upload-modal-card">
+      <button class="modal-close-btn" onclick="closeAllModals()">✕</button>
+      <h2 style="font-size: 22px; font-weight: 800; margin-bottom: 8px;">Scan to Upload Document</h2>
+      <p style="color: #94a3b8; font-size: 14px;">Scan with your mobile camera. Upload directly from your phone.</p>
+      <div class="qr-code-box" id="mobile-qr-code-box"></div>
+      <div style="font-size: 12px; color: #60a5fa;">Awaiting upload from mobile device...</div>
+    </div>
+  </div>
+
+  <!-- Wi-Fi Hotspot Modal -->
+  <div class="upload-modal-overlay" id="hotspot-modal">
+    <div class="upload-modal-card">
+      <button class="modal-close-btn" onclick="closeAllModals()">✕</button>
+      <h2 style="font-size: 22px; font-weight: 800; margin-bottom: 12px;">Kiosk Wi-Fi Hotspot</h2>
+      <div style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 8px; padding: 16px; text-align: left; font-size: 14px; margin-bottom: 16px;">
+        <div style="margin-bottom: 8px;"><strong>1. Wi-Fi SSID:</strong> <code>PrintKiosk-WiFi</code></div>
+        <div style="margin-bottom: 8px;"><strong>2. Password:</strong> <code>kiosk1234</code></div>
+        <div><strong>3. Browser URL:</strong> <code>http://192.168.4.1:3000</code></div>
+      </div>
+      <p style="color: #94a3b8; font-size: 13px;">Once connected to the hotspot, open your browser to the URL above to upload your document.</p>
+    </div>
+  </div>
+
+  <!-- USB File Selector Modal -->
+  <div class="upload-modal-overlay" id="usb-modal">
+    <div class="upload-modal-card" style="max-width: 640px;">
+      <button class="modal-close-btn" onclick="closeAllModals()">✕</button>
+      <h2 style="font-size: 22px; font-weight: 800; margin-bottom: 8px;">Select Document from USB Drive</h2>
+      <p style="color: #94a3b8; font-size: 14px;">Drive is mounted read-only for security.</p>
+      <div class="usb-file-list" id="usb-file-list-container"></div>
+    </div>
+  </div>
+
+  <script>
+    function openQrModal() { document.getElementById("qr-modal").classList.add("active"); }
+    function openHotspotModal() { document.getElementById("hotspot-modal").classList.add("active"); }
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    }
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

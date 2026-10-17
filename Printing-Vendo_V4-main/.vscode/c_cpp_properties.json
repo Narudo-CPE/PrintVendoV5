@@ -1,0 +1,25 @@
+{
+  "configurations": [
+    {
+      "name": "Arduino Uno R3",
+      "includePath": [
+        "${workspaceFolder}/**",
+        "/usr/share/arduino/hardware/arduino/avr/cores/arduino",
+        "/usr/share/arduino/hardware/arduino/avr/variants/standard"
+      ],
+      "defines": [
+        "ARDUINO=10819",
+        "ARDUINO_ARCH_AVR",
+        "__AVR_ATmega328P__"
+      ],
+      "compilerPath": "/usr/bin/avr-gcc",
+      "cStandard": "c17",
+      "cppStandard": "c++11",
+      "intelliSenseMode": "linux-gcc-x64",
+      "forcedInclude": [
+        "/usr/share/arduino/hardware/arduino/avr/cores/arduino/Arduino.h"
+      ]
+    }
+  ],
+  "version": 4
+}

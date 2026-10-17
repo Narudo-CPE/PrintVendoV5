@@ -1,0 +1,6 @@
+{
+  "name": "Self-Service Print Kiosk",
+  "description": "Local-first self-service print kiosk for Raspberry Pi OS, with pixel-density pricing, PayMongo GCash, cash acceptors, and PDF preview.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

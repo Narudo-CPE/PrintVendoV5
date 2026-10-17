@@ -1,0 +1,351 @@
+/**
+ * ============================================================================
+ * Autonomous Self-Service Print Kiosk - Microcontroller Firmware
+ * Target: Arduino Uno R3 (ATmega328P @ 16MHz, 5V Logic)
+ * Serial: 115200 Baud, 8N1
+ * ============================================================================
+ *
+ * Hardware Peripherals Connected:
+ * 1. Allan 1239A Pro Max Multi-Coin Acceptor (Pin 2 / INT0, Pin 8 Inhibit)
+ * 2. TB74 Pulse Bill Acceptor (Pin 3 / INT1, Pin 9 Inhibit)
+ * 3. 3x DRV8825 Stepper Motor Drivers (NEMA17 HD40) for Paper Trays:
+ *    - Tray 1: A4 Paper Tray (Step: Pin 4, Dir: Pin 5)
+ *    - Tray 2: Letter Paper Tray (Step: Pin 6, Dir: Pin 7)
+ *    - Tray 3: Long / Legal Paper Tray (Step: Pin 10, Dir: Pin 11)
+ *    - Shared Stepper Enable (Pin 12, Active LOW)
+ * 4. 2x 220V AC Coin Hoppers via 5V Optocoupled Relays (₱1 and ₱5 Coins):
+ *    - ₱5 Hopper Relay: Pin A0 (Active LOW Relay)
+ *    - ₱1 Hopper Relay: Pin A1 (Active LOW Relay)
+ *    - ₱5 Optical Exit Sensor: Pin A2 (Optional)
+ *    - ₱1 Optical Exit Sensor: Pin A3 (Optional)
+ * 5. Onboard Status / Activity LED: Pin 13
+ *
+ * Serial Protocol Specification:
+ * - Pi -> Arduino:
+ *     PING\n                  -> Handshake / Heartbeat query
+ *     ACCEPTORS:ENABLE\n      -> Enable bill & coin acceptors
+ *     ACCEPTORS:DISABLE\n     -> Inhibit / disable acceptors
+ *     MOTOR:A4:FEED\n         -> Feed 1 sheet from A4 tray
+ *     MOTOR:LETTER:FEED\n     -> Feed 1 sheet from Letter tray
+ *     MOTOR:LONG:FEED\n       -> Feed 1 sheet from Long tray
+ *     HOPPER:5:DISPENSE\n     -> Dispense 1x ₱5 coin
+ *     HOPPER:1:DISPENSE\n     -> Dispense 1x ₱1 coin
+ *
+ * - Arduino -> Pi:
+ *     PONG\n                  -> Handshake response
+ *     HEARTBEAT\n             -> Periodic alive signal (~4s)
+ *     COIN:<value>\n          -> e.g. COIN:1, COIN:5, COIN:10, COIN:20
+ *     BILL:<value>\n          -> e.g. BILL:20, BILL:50, BILL:100, BILL:200
+ *     ACK:ACCEPTORS:ENABLED\n -> Acceptors active
+ *     ACK:ACCEPTORS:DISABLED\n-> Acceptors in standby
+ *     ACK:MOTOR:<TRAY>\n      -> Motor step sequence complete
+ *     ACK:HOPPER:<VAL>\n      -> Coin dispensed
+ * ============================================================================
+ */
+
+#include <Arduino.h>
+
+// ==========================================
+// 1. PIN DEFINITIONS
+// ==========================================
+
+// --- Coin Acceptor (Allan 1239A) ---
+const uint8_t PIN_COIN_PULSE    = 2;  // INT0 Hardware Interrupt
+const uint8_t PIN_COIN_INHIBIT  = 8;  // HIGH = Inhibit (Disabled), LOW = Enabled
+
+// --- Bill Acceptor (TB74) ---
+const uint8_t PIN_BILL_PULSE    = 3;  // INT1 Hardware Interrupt
+const uint8_t PIN_BILL_INHIBIT  = 9;  // HIGH = Inhibit (Disabled), LOW = Enabled
+
+// --- Stepper Drivers (DRV8825) for Paper Trays ---
+const uint8_t PIN_MOTOR_A4_STEP     = 4;
+const uint8_t PIN_MOTOR_A4_DIR      = 5;
+
+const uint8_t PIN_MOTOR_LETTER_STEP = 6;
+const uint8_t PIN_MOTOR_LETTER_DIR  = 7;
+
+const uint8_t PIN_MOTOR_LONG_STEP   = 10;
+const uint8_t PIN_MOTOR_LONG_DIR    = 11;
+
+const uint8_t PIN_STEPPER_ENABLE    = 12; // Active LOW: LOW = Energized, HIGH = Sleep/Idle
+
+// --- 220V AC Coin Hoppers via 5V Relays ---
+const uint8_t PIN_HOPPER_5_RELAY    = A0; // Active LOW Relay
+const uint8_t PIN_HOPPER_1_RELAY    = A1; // Active LOW Relay
+const uint8_t PIN_HOPPER_5_SENSOR   = A2; // Optical Coin Count Sensor (Active LOW)
+const uint8_t PIN_HOPPER_1_SENSOR   = A3; // Optical Coin Count Sensor (Active LOW)
+
+// --- Diagnostics ---
+const uint8_t PIN_STATUS_LED        = 13;
+
+// ==========================================
+// 2. CONFIGURATION & CONSTANTS
+// ==========================================
+#define SERIAL_BAUD 115200
+
+// Relay Logic (Most Arduino Relay modules are Active LOW)
+#define RELAY_ACTIVE   LOW
+#define RELAY_INACTIVE HIGH
+
+// Inhibit Line Logic for Acceptors (LOW = accept, HIGH = inhibit)
+#define ACCEPTOR_ENABLED_LEVEL  LOW
+#define ACCEPTOR_DISABLED_LEVEL HIGH
+
+// Timing Constants (milliseconds)
+const unsigned long COIN_PULSE_TIMEOUT_MS  = 280; // Silence time to finalize coin pulse train
+const unsigned long BILL_PULSE_TIMEOUT_MS  = 350; // Silence time to finalize bill pulse train
+const unsigned long HEARTBEAT_INTERVAL_MS  = 3500; // Periodic heartbeat to Host Pi
+const unsigned long HOPPER_PULSE_DURATION_MS = 250; // Default relay pulse if sensor is absent
+const unsigned long HOPPER_SAFETY_TIMEOUT_MS = 1200; // Max time hopper relay can stay ON
+
+// Stepper Feed Calibration (Steps required to advance 1 sheet into printer rollers)
+const int FEED_STEPS_A4     = 850;
+const int FEED_STEPS_LETTER = 850;
+const int FEED_STEPS_LONG   = 950;
+const int STEP_PULSE_DELAY_MICROS = 650; // Stepper speed control (lower = faster)
+
+// ==========================================
+// 3. GLOBAL STATE VARIABLES
+// ==========================================
+volatile unsigned int coinPulseCount = 0;
+volatile unsigned long lastCoinPulseTime = 0;
+
+volatile unsigned int billPulseCount = 0;
+volatile unsigned long lastBillPulseTime = 0;
+
+bool acceptorsEnabled = false;
+unsigned long lastHeartbeatTime = 0;
+
+// Non-blocking serial command buffer
+String serialCommandBuffer = "";
+
+// ==========================================
+// 4. INTERRUPT SERVICE ROUTINES (ISRs)
+// ==========================================
+
+// ISR for Allan 1239A Coin Acceptor (Pin 2 / INT0)
+void isrCoinPulse() {
+  unsigned long now = millis();
+  if (now - lastCoinPulseTime > 18) {
+    coinPulseCount++;
+    lastCoinPulseTime = now;
+  }
+}
+
+// ISR for TB74 Bill Acceptor (Pin 3 / INT1)
+void isrBillPulse() {
+  unsigned long now = millis();
+  if (now - lastBillPulseTime > 25) {
+    billPulseCount++;
+    lastBillPulseTime = now;
+  }
+}
+
+// ==========================================
+// 5. HELPER FUNCTIONS
+// ==========================================
+
+void setAcceptorsEnabled(bool enable) {
+  acceptorsEnabled = enable;
+  if (enable) {
+    digitalWrite(PIN_COIN_INHIBIT, ACCEPTOR_ENABLED_LEVEL);
+    digitalWrite(PIN_BILL_INHIBIT, ACCEPTOR_ENABLED_LEVEL);
+    Serial.println(F("ACK:ACCEPTORS:ENABLED"));
+  } else {
+    digitalWrite(PIN_COIN_INHIBIT, ACCEPTOR_DISABLED_LEVEL);
+    digitalWrite(PIN_BILL_INHIBIT, ACCEPTOR_DISABLED_LEVEL);
+    Serial.println(F("ACK:ACCEPTORS:DISABLED"));
+  }
+}
+
+int mapCoinPulsesToPesos(unsigned int pulses) {
+  if (pulses == 1)  return 1;
+  if (pulses == 5)  return 5;
+  if (pulses == 10) return 10;
+  if (pulses == 20) return 20;
+  if (pulses > 0 && pulses <= 20) return pulses;
+  return 0;
+}
+
+int mapBillPulsesToPesos(unsigned int pulses) {
+  if (pulses == 1)  return 20;
+  if (pulses == 2)  return 50;
+  if (pulses == 5)  return 100;
+  if (pulses == 10) return 200;
+  if (pulses == 20) return 200;
+  return 0;
+}
+
+void feedTray(uint8_t stepPin, uint8_t dirPin, int steps, const char* trayName) {
+  digitalWrite(PIN_STEPPER_ENABLE, LOW);
+  delayMicroseconds(50);
+
+  digitalWrite(dirPin, HIGH);
+  delayMicroseconds(10);
+
+  for (int i = 0; i < steps; i++) {
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(STEP_PULSE_DELAY_MICROS);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(STEP_PULSE_DELAY_MICROS);
+  }
+
+  digitalWrite(PIN_STEPPER_ENABLE, HIGH);
+
+  Serial.print(F("ACK:MOTOR:"));
+  Serial.println(trayName);
+}
+
+void dispenseCoin(uint8_t relayPin, uint8_t sensorPin, int denomination) {
+  digitalWrite(relayPin, RELAY_ACTIVE);
+  digitalWrite(PIN_STATUS_LED, HIGH);
+
+  unsigned long startTime = millis();
+
+  while (millis() - startTime < HOPPER_SAFETY_TIMEOUT_MS) {
+    if (digitalRead(sensorPin) == LOW) {
+      delay(40);
+      break;
+    }
+    if (millis() - startTime >= HOPPER_PULSE_DURATION_MS) {
+      break;
+    }
+    delay(5);
+  }
+
+  digitalWrite(relayPin, RELAY_INACTIVE);
+  digitalWrite(PIN_STATUS_LED, LOW);
+
+  Serial.print(F("ACK:HOPPER:"));
+  Serial.println(denomination);
+}
+
+void handleSerialCommand(String cmd) {
+  cmd.trim();
+  if (cmd.length() == 0) return;
+
+  if (cmd.equalsIgnoreCase("PING")) {
+    Serial.println(F("PONG"));
+    digitalWrite(PIN_STATUS_LED, !digitalRead(PIN_STATUS_LED));
+  }
+  else if (cmd.equalsIgnoreCase("ACCEPTORS:ENABLE")) {
+    setAcceptorsEnabled(true);
+  }
+  else if (cmd.equalsIgnoreCase("ACCEPTORS:DISABLE")) {
+    setAcceptorsEnabled(false);
+  }
+  else if (cmd.equalsIgnoreCase("MOTOR:A4:FEED")) {
+    feedTray(PIN_MOTOR_A4_STEP, PIN_MOTOR_A4_DIR, FEED_STEPS_A4, "A4");
+  }
+  else if (cmd.equalsIgnoreCase("MOTOR:LETTER:FEED")) {
+    feedTray(PIN_MOTOR_LETTER_STEP, PIN_MOTOR_LETTER_DIR, FEED_STEPS_LETTER, "LETTER");
+  }
+  else if (cmd.equalsIgnoreCase("MOTOR:LONG:FEED")) {
+    feedTray(PIN_MOTOR_LONG_STEP, PIN_MOTOR_LONG_DIR, FEED_STEPS_LONG, "LONG");
+  }
+  else if (cmd.equalsIgnoreCase("HOPPER:5:DISPENSE")) {
+    dispenseCoin(PIN_HOPPER_5_RELAY, PIN_HOPPER_5_SENSOR, 5);
+  }
+  else if (cmd.equalsIgnoreCase("HOPPER:1:DISPENSE")) {
+    dispenseCoin(PIN_HOPPER_1_RELAY, PIN_HOPPER_1_SENSOR, 1);
+  }
+  else {
+    Serial.print(F("ERROR:UNKNOWN_COMMAND:"));
+    Serial.println(cmd);
+  }
+}
+
+void setup() {
+  Serial.begin(SERIAL_BAUD);
+  serialCommandBuffer.reserve(64);
+
+  pinMode(PIN_STATUS_LED, OUTPUT);
+  digitalWrite(PIN_STATUS_LED, LOW);
+
+  pinMode(PIN_COIN_PULSE, INPUT_PULLUP);
+  pinMode(PIN_COIN_INHIBIT, OUTPUT);
+  digitalWrite(PIN_COIN_INHIBIT, ACCEPTOR_DISABLED_LEVEL);
+
+  pinMode(PIN_BILL_PULSE, INPUT_PULLUP);
+  pinMode(PIN_BILL_INHIBIT, OUTPUT);
+  digitalWrite(PIN_BILL_INHIBIT, ACCEPTOR_DISABLED_LEVEL);
+
+  pinMode(PIN_MOTOR_A4_STEP, OUTPUT);
+  pinMode(PIN_MOTOR_A4_DIR, OUTPUT);
+  pinMode(PIN_MOTOR_LETTER_STEP, OUTPUT);
+  pinMode(PIN_MOTOR_LETTER_DIR, OUTPUT);
+  pinMode(PIN_MOTOR_LONG_STEP, OUTPUT);
+  pinMode(PIN_MOTOR_LONG_DIR, OUTPUT);
+
+  pinMode(PIN_STEPPER_ENABLE, OUTPUT);
+  digitalWrite(PIN_STEPPER_ENABLE, HIGH);
+
+  pinMode(PIN_HOPPER_5_RELAY, OUTPUT);
+  pinMode(PIN_HOPPER_1_RELAY, OUTPUT);
+  digitalWrite(PIN_HOPPER_5_RELAY, RELAY_INACTIVE);
+  digitalWrite(PIN_HOPPER_1_RELAY, RELAY_INACTIVE);
+
+  pinMode(PIN_HOPPER_5_SENSOR, INPUT_PULLUP);
+  pinMode(PIN_HOPPER_1_SENSOR, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(PIN_COIN_PULSE), isrCoinPulse, FALLING);
+  attachInterrupt(digitalPinToInterrupt(PIN_BILL_PULSE), isrBillPulse, FALLING);
+
+  Serial.println(F("BOOT:KIOSK_CONTROLLER_V1.0_ONLINE"));
+  Serial.println(F("PONG"));
+}
+
+void loop() {
+  unsigned long now = millis();
+
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (serialCommandBuffer.length() > 0) {
+        handleSerialCommand(serialCommandBuffer);
+        serialCommandBuffer = "";
+      }
+    } else {
+      if (serialCommandBuffer.length() < 60) {
+        serialCommandBuffer += c;
+      }
+    }
+  }
+
+  if (coinPulseCount > 0 && (now - lastCoinPulseTime >= COIN_PULSE_TIMEOUT_MS)) {
+    noInterrupts();
+    unsigned int pulses = coinPulseCount;
+    coinPulseCount = 0;
+    interrupts();
+
+    int pesoValue = mapCoinPulsesToPesos(pulses);
+    if (pesoValue > 0) {
+      Serial.print(F("COIN:"));
+      Serial.println(pesoValue);
+    } else {
+      Serial.print(F("WARN:UNRECOGNIZED_COIN_PULSES:"));
+      Serial.println(pulses);
+    }
+  }
+
+  if (billPulseCount > 0 && (now - lastBillPulseTime >= BILL_PULSE_TIMEOUT_MS)) {
+    noInterrupts();
+    unsigned int pulses = billPulseCount;
+    billPulseCount = 0;
+    interrupts();
+
+    int pesoValue = mapBillPulsesToPesos(pulses);
+    if (pesoValue > 0) {
+      Serial.print(F("BILL:"));
+      Serial.println(pesoValue);
+    } else {
+      Serial.print(F("WARN:UNRECOGNIZED_BILL_PULSES:"));
+      Serial.println(pulses);
+    }
+  }
+
+  if (now - lastHeartbeatTime >= HEARTBEAT_INTERVAL_MS) {
+    lastHeartbeatTime = now;
+    Serial.println(F("HEARTBEAT"));
+  }
+}
